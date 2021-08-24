@@ -15,26 +15,24 @@ Unistep2 stepper(14, 12, 13, 16, 4096, 900);
 // Initialize fauxmoESP - alexa integration library
 fauxmoESP alexa;
 
-#define BUTTON_PIN 0 // This is the esp8266 FLASH button
+// This is the esp8266 FLASH button
+#define BUTTON_PIN 0
 
 // Steps to travel half curtain rod (~10 rotations needed)
-int maxSteps = 4096 * 10;
+int travelSteps = 4096 * 10;
 
-const char *controlTopic = "curtain/control";
-const char *setDistanceTopic = "curtain/setDistance";
-const char *logTopic = "curtain/log";
+const char *controlTopic = "curtain/control";     // Topic to send controls to ESP
+const char *setTravelTopic = "curtain/setTravel"; // Topic to set curtain rod travel steps
+const char *logTopic = "curtain/log";             // Topic to log commands
 
+// Initialize MQTT Client Object
 WiFiClient espClient;
 PubSubClient client(espClient);
+
+// This is used to later to convert MQTT incoming payload
 unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE (50)
 char msg[MSG_BUFFER_SIZE];
-int value = 0;
-
-int lastSteps = 0;
-int startTime = 0;
-int endTime = 0;
-bool done = false;
 
 /******************************** WiFi Setup ************************************/
 
@@ -83,26 +81,26 @@ void callback(char *topic, byte *payload, unsigned int length)
   {
     if ((char)payload[0] == '1') // '1' to CW move (OPEN CURTAINS)
     {
-      snprintf(msg, MSG_BUFFER_SIZE, "Move requested: %d", maxSteps);
+      snprintf(msg, MSG_BUFFER_SIZE, "Move requested: %d", travelSteps);
       client.publish(logTopic, msg);
 
       // activate if not moving
       if (stepper.stepsToGo() == 0)
       {
-        stepper.move(maxSteps);
-        Serial.printf("Stepper moving %d steps \n", maxSteps);
+        stepper.move(travelSteps);
+        Serial.printf("Stepper moving %d steps \n", travelSteps);
       }
     }
     else if ((char)payload[0] == '2') // '2' to CCW move (CLOSE CURTAINS)
     {
-      snprintf(msg, MSG_BUFFER_SIZE, "Revers move requested: -%d", maxSteps);
+      snprintf(msg, MSG_BUFFER_SIZE, "Revers move requested: -%d", travelSteps);
       client.publish(logTopic, msg);
 
       // activate if not moving
       if (stepper.stepsToGo() == 0)
       {
-        stepper.move(-1 * maxSteps);
-        Serial.printf("Stepper moving -%d steps \n", maxSteps);
+        stepper.move(-1 * travelSteps);
+        Serial.printf("Stepper moving -%d steps \n", travelSteps);
       }
     }
     else if ((char)payload[0] == '3') // '3' to move/reset to nearest rotation
@@ -116,12 +114,12 @@ void callback(char *topic, byte *payload, unsigned int length)
       }
     }
   }
-  else if (strcmp(topic, setDistanceTopic) == 0 && payload)
+  else if (strcmp(topic, setTravelTopic) == 0 && payload)
   {
     payload[length] = '\0'; // Make payload a string by NULL terminating it.
     int newSteps = atoi((char *)payload);
-    maxSteps = newSteps;
-    Serial.printf("maxSteps set to %d\n", maxSteps);
+    travelSteps = newSteps;
+    Serial.printf("travelSteps set to %d\n", travelSteps);
   }
   else if (payload)
   {
@@ -163,7 +161,7 @@ void reconnect()
       // Once connected, publish an announcement...
       client.publish(logTopic, "ESP reconnected.");
       // ... and resubscribe
-      client.subscribe(setDistanceTopic);
+      client.subscribe(setTravelTopic);
       client.subscribe(controlTopic);
     }
     else
