@@ -1,3 +1,5 @@
+// Edit and rename file to "credentials.h"
+
 // Wifi config
 #define WIFI_SSID "home_wifi_2G"
 #define WIFI_PASS "password420"
