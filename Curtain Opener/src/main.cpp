@@ -15,27 +15,36 @@ Unistep2 stepper(14, 12, 13, 16, 4096, 900);
 // Initialize fauxmoESP - alexa integration library
 fauxmoESP alexa;
 
-// This is the esp8266 FLASH button
+// For Serial Monitor
+#define SERIAL_BAUDRATE 115200
+
+// This will be the name that Alexa discovers
+#define ALEXA_NAME "Curtains"
+
+// This is the esp8266 FLASH button to use as emergency stop
 #define BUTTON_PIN 0
 
 // Steps to travel half curtain rod (~10 rotations needed)
 int travelSteps = 4096 * 10;
 
-const char *controlTopic = "curtain/control";     // Topic to send controls to ESP
-const char *setTravelTopic = "curtain/setTravel"; // Topic to set curtain rod travel steps
-const char *logTopic = "curtain/log";             // Topic to log commands
+// Track state of curtains (make sure they are open when restarting)
+bool curtainsOpen = true;
 
 // Initialize MQTT Client Object
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// This is used to later to convert MQTT incoming payload
+// MQTT Topic names
+const char *controlTopic = "curtain/control";     // Topic to send controls to ESP
+const char *setTravelTopic = "curtain/setTravel"; // Topic to set curtain rod travel steps
+const char *logTopic = "curtain/log";             // Topic to log commands
+
+// Used by MQTT to load and convert payload
 unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE (50)
 char msg[MSG_BUFFER_SIZE];
 
 /******************************** WiFi Setup ************************************/
-
 void setup_wifi()
 {
 
@@ -62,13 +71,12 @@ void setup_wifi()
   Serial.println(WiFi.localIP());
 }
 
-/************************* Where the magic happens *******************************/
-
+/************************* When MQTT Message Received ***************************/
 // Is called upon incoming MQTT msg
-void callback(char *topic, byte *payload, unsigned int length)
+void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
 
-  Serial.print("Message arrived [");
+  Serial.print("MQTT msg arrived [");
   Serial.print(topic);
   Serial.print("] ");
   for (unsigned int i = 0; i < length; i++)
@@ -77,74 +85,102 @@ void callback(char *topic, byte *payload, unsigned int length)
   }
   Serial.println();
 
-  if (strcmp(topic, controlTopic) == 0) // Handle curtain/control requests
+  // Toggle stepper only if correct topic, and stepper not already moving
+  if (strcmp(topic, controlTopic) == 0 && stepper.stepsToGo() == 0 && payload)
   {
-    if ((char)payload[0] == '1') // '1' to CW move (OPEN CURTAINS)
+    if (curtainsOpen)
     {
-      snprintf(msg, MSG_BUFFER_SIZE, "Move requested: %d", travelSteps);
-      client.publish(logTopic, msg);
-
-      // activate if not moving
-      if (stepper.stepsToGo() == 0)
-      {
-        stepper.move(travelSteps);
-        Serial.printf("Stepper moving %d steps \n", travelSteps);
-      }
+      snprintf(msg, MSG_BUFFER_SIZE, "Close requested by MQTT");
+      stepper.move(-1 * travelSteps);
+      alexa.setState(ALEXA_NAME, false, 255); // update alexa state
+      curtainsOpen = false;
     }
-    else if ((char)payload[0] == '2') // '2' to CCW move (CLOSE CURTAINS)
+    else
     {
-      snprintf(msg, MSG_BUFFER_SIZE, "Revers move requested: -%d", travelSteps);
-      client.publish(logTopic, msg);
-
-      // activate if not moving
-      if (stepper.stepsToGo() == 0)
-      {
-        stepper.move(-1 * travelSteps);
-        Serial.printf("Stepper moving -%d steps \n", travelSteps);
-      }
+      snprintf(msg, MSG_BUFFER_SIZE, "Open requested by MQTT");
+      stepper.move(travelSteps);
+      alexa.setState(ALEXA_NAME, true, 0); // update alexa state
+      curtainsOpen = true;
     }
-    else if ((char)payload[0] == '3') // '3' to move/reset to nearest rotation
-    {
-      // activate if not moving
-
-      if (stepper.stepsToGo() == 0)
-      {
-        Serial.printf("Resetting stepper position.\n");
-        stepper.moveTo(0);
-      }
-    }
+    client.publish(logTopic, msg);
+    Serial.println(msg);
   }
   else if (strcmp(topic, setTravelTopic) == 0 && payload)
   {
     payload[length] = '\0'; // Make payload a string by NULL terminating it.
     int newSteps = atoi((char *)payload);
     travelSteps = newSteps;
-    Serial.printf("travelSteps set to %d\n", travelSteps);
-  }
-  else if (payload)
-  {
-    // If not activated, publish an ack
-    client.publish(logTopic, "ack - but no move.");
+    snprintf(msg, MSG_BUFFER_SIZE, "TravelSteps set to: %d\n", travelSteps);
+    Serial.printf(msg);
+    client.publish(logTopic, msg);
   }
 }
 
-/*********************************** Setup **************************************/
-
-void setup()
+/************************* When Alexa Command Received ***************************/
+// Callback when a command from Alexa is received
+// You can use device_id or device_name to choose the element to perform an action onto (relay, LED,...)
+// State is a boolean (ON/OFF) and value a number from 0 to 255 (if you say "set kitchen light to 50%")
+void alexaCallback(unsigned char device_id, const char *device_name, bool state, unsigned char value)
 {
-  // Your setup code here
-  // The library initializes the pins for you
+  Serial.printf("[MAIN] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
 
-  Serial.begin(115200);
-  pinMode(BUTTON_PIN, INPUT_PULLUP); // Set FLASH button to pullup
-  Serial.println(F(" *** Unistep2 test ***"));
-  setup_wifi();
-  client.setServer(MQTT_BROKER, MQTT_PORT);
-  client.setCallback(callback);
+  // check if Alexa is commanding this device, and if stepper not already moving
+  if (strcmp(device_name, ALEXA_NAME) == 0 && stepper.stepsToGo() == 0)
+  {
+    // If state received as "true" then we open curtains (CW)
+    // If state received as "false" then we close curtains (CCW)
+    if (state) // Open curtains
+    {
+      if (!curtainsOpen)
+      {
+        curtainsOpen = true;
+        stepper.move(travelSteps);
+        Serial.println("Open requested by Alexa");
+        snprintf(msg, MSG_BUFFER_SIZE, "Open requested by Alexa");
+        client.publish(logTopic, msg);
+      }
+      else
+      {
+        Serial.println("Open requested by Alexa, but already open.");
+      }
+    }
+    else // Close curtains
+    {
+      if (curtainsOpen)
+      {
+        curtainsOpen = false;
+        stepper.move(-1 * travelSteps);
+        Serial.println("Close requested by Alexa");
+        snprintf(msg, MSG_BUFFER_SIZE, "Close requested by Alexa");
+        client.publish(logTopic, msg);
+      }
+      else
+      {
+        Serial.println("Close requested by Alexa, but already closed.");
+      }
+    }
+  }
+}
+
+/******************************** Alexa Setup ************************************/
+void setup_alexa()
+{
+  alexa.createServer(true);
+
+  // The TCP port must be 80 for gen3 devices (default is 1901)
+  alexa.setPort(80);
+
+  // You can enable/disable alexa device programmatically
+  alexa.enable(true);
+
+  // Add virtual device with it's name
+  alexa.addDevice(ALEXA_NAME);
+
+  // Bind callback for when a command from Alexa is received
+  alexa.onSetState(alexaCallback);
 }
 
 /***************************** Reconnect to MQTT *******************************/
-
 void reconnect()
 {
   // Loop until we're reconnected
@@ -159,7 +195,7 @@ void reconnect()
     {
       Serial.printf(" connected to %s\n", MQTT_BROKER);
       // Once connected, publish an announcement...
-      client.publish(logTopic, "ESP reconnected.");
+      client.publish(logTopic, "ESP Connected to MQTT");
       // ... and resubscribe
       client.subscribe(setTravelTopic);
       client.subscribe(controlTopic);
@@ -175,28 +211,50 @@ void reconnect()
   }
 }
 
-/******************************** Main Loop ************************************/
+/*********************************** Setup **************************************/
+void setup()
+{
+  // Your setup code here
+  // The library initializes the pins for you
 
+  Serial.begin(SERIAL_BAUDRATE);
+  pinMode(BUTTON_PIN, INPUT_PULLUP); // Set FLASH button to pullup
+  Serial.println(F(" *** Curtains Opener starting ***"));
+  setup_wifi();
+  setup_alexa();
+  client.setServer(MQTT_BROKER, MQTT_PORT);
+  client.setCallback(mqttCallback);
+}
+
+/******************************** Main Loop ************************************/
 void loop()
 {
-  /******* MQTT Code *******/
+  /************** MQTT Code **************/
   // Check frequently for MQTT connection, reconnect if necessary
   if (!client.connected())
   {
     reconnect();
   }
-
-  /******* Maintenance calls *******/
-  // We need to call run() frequently for non-blocking stepper movement
-  stepper.run();
   // Called frequently to allow the client to process incoming messages
   // and maintain its connection to the server.
   client.loop();
 
-  /******* Emergency Stop *******/
+  /************** Alexa Code **************/
+  // fauxmoESP uses an async TCP server but a sync UDP server
+  // Therefore, we have to manually poll for UDP packets
+  alexa.handle();
+
+  /************** Maintenance calls *******/
+  // We need to call run() frequently for non-blocking stepper movement
+  stepper.run();
+
+  /************** Emergency Stop **********/
   if (stepper.stepsToGo() != 0 && digitalRead(BUTTON_PIN) == LOW)
   {
     stepper.stop();
-    Serial.printf("Stopped at position: %d\n", stepper.currentPosition());
+    curtainsOpen = !curtainsOpen;
+    snprintf(msg, MSG_BUFFER_SIZE, "Stepper reversed - Curtain are now %s\n", curtainsOpen ? "Opened" : "Closed");
+    Serial.println(msg);
+    client.publish(logTopic, msg);
   }
 }
